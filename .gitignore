@@ -5,3 +5,4 @@ artifacts/
 data/
 .venv/
 .DS_Store
+data/raw/
