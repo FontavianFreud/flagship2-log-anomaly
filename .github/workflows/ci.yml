@@ -1,0 +1,17 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          environment-file: environment.yml
+          activate-environment: mle
+          auto-activate-base: false
+      - shell: bash -l {0}
+        run: |
+          python -c "import numpy, pandas, sklearn"
+          pytest -q
