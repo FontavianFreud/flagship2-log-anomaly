@@ -10,3 +10,7 @@ data/raw/
 # Local-only
 .env
 .vscode/
+
+# Week 8 feedback loop
+/data/feedback/
+/data/review/
