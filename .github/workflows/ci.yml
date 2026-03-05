@@ -1,17 +1,102 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
 
 jobs:
-  test:
+  test-and-smoke:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up conda env (environment.yml)
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          environment-file: environment.yml
           activate-environment: mle
+          environment-file: environment.yml
           auto-activate-base: false
-      - shell: bash -l {0}
+
+      - name: Install (pip extras, if any)
+        shell: bash -l {0}
         run: |
-          python -c "import numpy, pandas, sklearn"
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run unit tests
+        shell: bash -l {0}
+        run: |
           pytest -q
+
+      - name: Create tiny CI artifacts for API startup
+        shell: bash -l {0}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import numpy as np
+          import joblib
+          from sklearn.pipeline import Pipeline
+          from sklearn.preprocessing import StandardScaler
+          from sklearn.ensemble import IsolationForest
+          from sklearn.svm import OneClassSVM
+
+          # Use your project’s scoring convention: higher = more anomalous by negating
+          # IsolationForest.score_samples / OneClassSVM.decision_function. :contentReference[oaicite:1]{index=1}
+          from src.log_anomaly.modeling import anomaly_scores, threshold_percentile
+
+          ART = Path("artifacts")
+          ART.mkdir(parents=True, exist_ok=True)
+
+          feature_cols = ["f1", "f2", "f3"]
+          (ART / "feature_schema.json").write_text(
+              json.dumps({"feature_columns": feature_cols}, indent=2),
+              encoding="utf-8",
+          )
+
+          rng = np.random.RandomState(0)
+          X = rng.normal(size=(300, len(feature_cols)))
+
+          iforest = Pipeline([
+              ("scaler", StandardScaler()),
+              ("model", IsolationForest(n_estimators=50, random_state=0)),
+          ]).fit(X)
+
+          ocsvm = Pipeline([
+              ("scaler", StandardScaler()),
+              ("model", OneClassSVM(kernel="rbf", nu=0.05, gamma="scale")),
+          ]).fit(X)
+
+          joblib.dump(iforest, ART / "iforest.joblib")
+          joblib.dump(ocsvm, ART / "ocsvm.joblib")
+
+          thr_if = threshold_percentile(anomaly_scores(iforest, X), 95.0)
+          thr_oc = threshold_percentile(anomaly_scores(ocsvm, X), 95.0)
+
+          (ART / "thresholds.json").write_text(
+              json.dumps(
+                  {"iforest": {"threshold": float(thr_if)}, "ocsvm": {"threshold": float(thr_oc)}},
+                  indent=2,
+              ),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Start API (background)
+        shell: bash -l {0}
+        run: |
+          uvicorn src.api:app --host 127.0.0.1 --port 8000 &
+          echo $! > uvicorn.pid
+
+      - name: Smoke test API
+        shell: bash -l {0}
+        run: |
+          python scripts/smoke_test_api.py
+
+      - name: Stop API
+        if: always()
+        shell: bash -l {0}
+        run: |
+          if [ -f uvicorn.pid ]; then kill $(cat uvicorn.pid) || true; fi

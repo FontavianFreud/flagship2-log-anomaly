@@ -1,9 +1,9 @@
-# src/api.py
 from __future__ import annotations
 
 import json
 import time
 import logging
+import math
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,14 +22,14 @@ ARTIFACTS = Path("artifacts")
 
 
 class ScoreRow(BaseModel):
-    group: str
+    group: str = Field(..., min_length=1)
     window_start: Optional[str] = None
     features: Dict[str, float] = Field(..., description="Feature dict matching feature_schema.json")
 
 
 class ScoreBatchRequest(BaseModel):
     model: str = Field(..., description="iforest or ocsvm")
-    rows: List[ScoreRow]
+    rows: List[ScoreRow] = Field(..., min_items=1)
 
 
 class ScoreBatchResponseRow(BaseModel):
@@ -106,12 +106,12 @@ def metrics() -> Dict[str, Any]:
 
     recent = list(STATE["recent_scores"])
     if recent:
-        recent = np.array(recent, dtype=float)
+        recent_arr = np.array(recent, dtype=float)
         score_snapshot = {
-            "n": int(len(recent)),
-            "p50": float(np.percentile(recent, 50)),
-            "p90": float(np.percentile(recent, 90)),
-            "p99": float(np.percentile(recent, 99)),
+            "n": int(len(recent_arr)),
+            "p50": float(np.percentile(recent_arr, 50)),
+            "p90": float(np.percentile(recent_arr, 90)),
+            "p99": float(np.percentile(recent_arr, 99)),
         }
     else:
         score_snapshot = {"n": 0}
@@ -128,6 +128,70 @@ def metrics() -> Dict[str, Any]:
     }
 
 
+def _vectorize_features(feats: Dict[str, float], row_idx: int) -> List[float]:
+    """
+    Convert feature dict -> vector in FEATURE_COLS order.
+
+    Reliability polish: strict validation so we fail loudly on schema mismatches,
+    instead of silently defaulting missing features to 0.0.
+    """
+    if not isinstance(feats, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_features_type", "row": row_idx, "hint": "features must be a JSON object"},
+        )
+
+    required = set(FEATURE_COLS)
+    provided = set(feats.keys())
+
+    missing = sorted(required - provided)
+    extra = sorted(provided - required)
+
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "missing_features",
+                "row": row_idx,
+                "n_missing": len(missing),
+                "missing_first_20": missing[:20],
+                "hint": "features must match artifacts/feature_schema.json",
+            },
+        )
+
+    if extra:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "extra_features",
+                "row": row_idx,
+                "n_extra": len(extra),
+                "extra_first_20": extra[:20],
+                "hint": "remove unknown feature keys",
+            },
+        )
+
+    vec: List[float] = []
+    for c in FEATURE_COLS:
+        try:
+            v = float(feats[c])
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "non_numeric_feature", "row": row_idx, "feature": c, "value": str(feats[c])},
+            )
+
+        if not math.isfinite(v):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "non_finite_feature", "row": row_idx, "feature": c, "value": v},
+            )
+
+        vec.append(v)
+
+    return vec
+
+
 @app.post("/score_batch", response_model=ScoreBatchResponse)
 def score_batch(req: ScoreBatchRequest) -> ScoreBatchResponse:
     t0 = time.time()
@@ -142,14 +206,11 @@ def score_batch(req: ScoreBatchRequest) -> ScoreBatchResponse:
     threshold = THRESHOLDS[model_name]
 
     # Build X in strict column order
-    X_list = []
-    for r in req.rows:
-        feats = r.features
-        try:
-            X_list.append([float(feats.get(c, 0.0)) for c in FEATURE_COLS])
-        except Exception:
-            STATE["errors"] += 1
-            raise HTTPException(status_code=400, detail="invalid feature values")
+    try:
+        X_list = [_vectorize_features(r.features, i) for i, r in enumerate(req.rows)]
+    except HTTPException:
+        STATE["errors"] += 1
+        raise
 
     X = np.asarray(X_list, dtype=float)
     scores = anomaly_scores(model, X)
@@ -172,7 +233,7 @@ def score_batch(req: ScoreBatchRequest) -> ScoreBatchResponse:
         latency_ms,
     )
 
-    out_rows = []
+    out_rows: List[ScoreBatchResponseRow] = []
     for r, s, f in zip(req.rows, scores.tolist(), flags.tolist()):
         out_rows.append(
             ScoreBatchResponseRow(
