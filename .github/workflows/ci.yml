@@ -19,18 +19,18 @@ jobs:
           environment-file: environment.yml
           auto-activate-base: false
 
-      - name: Install (pip extras, if any)
+      - name: Install pip requirements (if present)
         shell: bash -l {0}
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run unit tests
+      - name: Unit tests
         shell: bash -l {0}
         run: |
           pytest -q
 
-      - name: Create tiny CI artifacts for API startup
+      - name: Create tiny CI artifacts (so API can start)
         shell: bash -l {0}
         run: |
           python - <<'PY'
@@ -43,9 +43,7 @@ jobs:
           from sklearn.ensemble import IsolationForest
           from sklearn.svm import OneClassSVM
 
-          # Use your project’s scoring convention: higher = more anomalous by negating
-          # IsolationForest.score_samples / OneClassSVM.decision_function. :contentReference[oaicite:1]{index=1}
-          from src.log_anomaly.modeling import anomaly_scores, threshold_percentile
+          from log_anomaly.modeling import anomaly_scores, threshold_percentile
 
           ART = Path("artifacts")
           ART.mkdir(parents=True, exist_ok=True)
@@ -82,21 +80,28 @@ jobs:
               ),
               encoding="utf-8",
           )
+          print("Wrote CI artifacts to artifacts/")
           PY
 
       - name: Start API (background)
         shell: bash -l {0}
         run: |
-          uvicorn src.api:app --host 127.0.0.1 --port 8000 &
+          set -euo pipefail
+          nohup uvicorn api:app --app-dir src --host 127.0.0.1 --port 8000 > uvicorn.log 2>&1 &
           echo $! > uvicorn.pid
+          sleep 1
+          echo "Uvicorn PID: $(cat uvicorn.pid)"
+          ps -p "$(cat uvicorn.pid)" || (echo "uvicorn failed to start"; echo "---- uvicorn.log ----"; cat uvicorn.log; exit 1)
+          echo "---- uvicorn.log (tail) ----"
+          tail -n 50 uvicorn.log || true
 
       - name: Smoke test API
         shell: bash -l {0}
         run: |
-          python scripts/smoke_test_api.py
+          python scripts/smoke_test_api.py || (echo "---- uvicorn.log ----"; cat uvicorn.log; exit 1)
 
       - name: Stop API
         if: always()
         shell: bash -l {0}
         run: |
-          if [ -f uvicorn.pid ]; then kill $(cat uvicorn.pid) || true; fi
+          if [ -f uvicorn.pid ]; then kill "$(cat uvicorn.pid)" || true; fi
