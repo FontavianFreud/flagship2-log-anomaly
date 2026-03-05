@@ -7,6 +7,8 @@ on:
 jobs:
   test-and-smoke:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
 
     steps:
       - name: Checkout
@@ -17,7 +19,7 @@ jobs:
         with:
           activate-environment: mle
           environment-file: environment.yml
-          auto-activate-base: false
+          auto-activate: false
 
       - name: Install pip requirements (if present)
         shell: bash -l {0}
@@ -80,6 +82,7 @@ jobs:
               ),
               encoding="utf-8",
           )
+
           print("Wrote CI artifacts to artifacts/")
           PY
 
@@ -90,9 +93,7 @@ jobs:
           nohup uvicorn api:app --app-dir src --host 127.0.0.1 --port 8000 > uvicorn.log 2>&1 &
           echo $! > uvicorn.pid
           sleep 1
-          echo "Uvicorn PID: $(cat uvicorn.pid)"
           ps -p "$(cat uvicorn.pid)" || (echo "uvicorn failed to start"; echo "---- uvicorn.log ----"; cat uvicorn.log; exit 1)
-          echo "---- uvicorn.log (tail) ----"
           tail -n 50 uvicorn.log || true
 
       - name: Smoke test API
