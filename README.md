@@ -65,9 +65,9 @@ flowchart LR
   D --> E[Train unsupervised models]
   E --> F[Artifacts: *.joblib + thresholds.json + feature_schema.json]
   F --> G[FastAPI scoring service]
-  G --> H[/score_batch]
-  G --> I[/metrics]
-  G --> J[/health]
+  G --> H["/score_batch"]
+  G --> I["/metrics"]
+  G --> J["/health"]
 ```
 
 ---
